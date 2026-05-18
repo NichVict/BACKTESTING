@@ -13,16 +13,10 @@ import plotly.graph_objects as go
 # DATA
 # =====================================================
 
-def get_data(ticker, interval="1h"):
+def get_data(ticker, interval="1h", days=365):
 
     end = datetime.now()
-
-    if interval == "1d":
-        start = end - timedelta(days=3650)
-    elif interval == "1h":
-        start = end - timedelta(days=700)
-    elif interval == "15m":
-        start = end - timedelta(days=59)
+    start = end - timedelta(days=days)
 
     df = yf.download(
         ticker,
@@ -73,8 +67,6 @@ class MA_EntryEngine_V7(Strategy):
         self.stop = None
         self.partial_taken = False
 
-    # ---------------- TREND ---------------- #
-
     def trend_up(self):
         price = self.data.Close[-1]
 
@@ -107,8 +99,6 @@ class MA_EntryEngine_V7(Strategy):
             and self.ma50[-1] < self.ma50[-5]
         )
 
-    # ---------------- ENTRY ---------------- #
-
     def pullback_long(self):
         return self.data.Low[-1] <= self.ma20[-1] <= self.data.High[-1]
 
@@ -121,35 +111,26 @@ class MA_EntryEngine_V7(Strategy):
     def short_trigger(self):
         return self.data.Close[-1] < self.data.Low[-2]
 
-    # ---------------- EXECUTION ---------------- #
-
     def next(self):
 
         price = self.data.Close[-1]
 
         if not self.position:
 
-            # LONG
             if self.trend_up() and self.pullback_long() and self.long_trigger():
-
                 self.stop = self.data.Low[-2]
                 self.buy(sl=self.stop)
-
                 self.entry_price = price
                 self.partial_taken = False
 
-            # SHORT
             elif self.trend_down() and self.pullback_short() and self.short_trigger():
-
                 self.stop = self.data.High[-2]
                 self.sell(sl=self.stop)
-
                 self.entry_price = price
                 self.partial_taken = False
 
         else:
 
-            # LONG
             if self.position.is_long:
 
                 if price <= self.stop:
@@ -165,7 +146,6 @@ class MA_EntryEngine_V7(Strategy):
                 if price >= self.entry_price + 2 * risk:
                     self.position.close()
 
-            # SHORT
             else:
 
                 if price >= self.stop:
@@ -218,6 +198,29 @@ timeframes = st.multiselect(
     default=["1h", "1d"]
 )
 
+backtest_period = st.selectbox(
+    "Período do Backtest",
+    ["5 anos", "4 anos", "3 anos", "2 anos", "1 ano", "6 meses"],
+    index=2
+)
+
+trade_filter = st.selectbox(
+    "Operações",
+    ["Todas", "Long", "Short"],
+    index=0
+)
+
+period_map = {
+    "5 anos": 365 * 5,
+    "4 anos": 365 * 4,
+    "3 anos": 365 * 3,
+    "2 anos": 365 * 2,
+    "1 ano": 365,
+    "6 meses": 180
+}
+
+backtest_days = period_map[backtest_period]
+
 run = st.button("🚀 Rodar análise")
 
 
@@ -236,7 +239,7 @@ if run:
 
         for tf in timeframes:
 
-            df = get_data(ticker, tf)
+            df = get_data(ticker, tf, days=backtest_days)
             df.tf = tf
 
             bt = Backtest(
@@ -250,31 +253,22 @@ if run:
 
             stats = bt.run()
             trades = stats._trades.copy()
-
             equity = stats._equity_curve["Equity"]
 
-            # ================= METRICS ================= #
-
             pnl = trades["PnL"].sum() if len(trades) else 0
-
             winrate = (trades["PnL"] > 0).mean() * 100 if len(trades) else 0
 
-            # Profit Factor
             gross_profit = trades.loc[trades["PnL"] > 0, "PnL"].sum()
             gross_loss = abs(trades.loc[trades["PnL"] < 0, "PnL"].sum())
             profit_factor = gross_profit / gross_loss if gross_loss != 0 else np.inf
 
-            # Expectancy
             expectancy = trades["PnL"].mean() if len(trades) else 0
 
-            # Returns
             returns = equity.pct_change().dropna()
-
             sharpe = (returns.mean() / returns.std()) * np.sqrt(len(returns)) if returns.std() != 0 else 0
 
-            # Drawdown
             peak = equity.cummax()
-            drawdown = (equity / peak - 1)
+            drawdown = equity / peak - 1
             max_dd = drawdown.min()
 
             results.append({
@@ -317,29 +311,29 @@ if st.session_state.results is not None:
         df_results["Timeframe"].tolist()
     )
 
-    trades = st.session_state.all_trades[selected]
-    equity = st.session_state.equity_curves[selected]
-    df_price = st.session_state.price_data[selected]
-
-    # ================= TRADES ================= #
+    trades = st.session_state.all_trades[selected].copy()
 
     if len(trades) > 0:
 
+        if trade_filter == "Long":
+            trades = trades[trades["Size"] > 0]
+        elif trade_filter == "Short":
+            trades = trades[trades["Size"] < 0]
+
+        equity = st.session_state.equity_curves[selected]
+        df_price = st.session_state.price_data[selected]
+
         styled = trades.copy()
         styled["Side"] = np.where(styled["Size"] > 0, "LONG", "SHORT")
-
         styled = styled.fillna("—")
 
         st.subheader("📋 Trades")
         st.dataframe(styled, use_container_width=True)
 
-        # ================= EQUITY + DRAWDOWN ================= #
-
         peak = equity.cummax()
         drawdown = equity / peak - 1
 
         fig = go.Figure()
-
         fig.add_trace(go.Scatter(y=equity, name="Equity"))
         fig.add_trace(go.Scatter(y=drawdown, name="Drawdown", yaxis="y2"))
 
@@ -353,26 +347,13 @@ if st.session_state.results is not None:
 
         st.plotly_chart(fig, use_container_width=True)
 
-        # ================= PNL DISTRIBUTION ================= #
-
         fig2 = go.Figure()
         fig2.add_trace(go.Histogram(x=trades["PnL"], nbinsx=30))
-
-        fig2.update_layout(
-            title="Distribuição de PnL por Trade",
-            template="plotly_dark"
-        )
-
         st.plotly_chart(fig2, use_container_width=True)
-
-        # ================= PRICE + ENTRIES ================= #
 
         fig3 = go.Figure()
 
-        fig3.add_trace(go.Scatter(
-            y=df_price["Close"],
-            name="Preço"
-        ))
+        fig3.add_trace(go.Scatter(y=df_price["Close"], name="Preço"))
 
         buys = trades[trades["Size"] > 0]
         sells = trades[trades["Size"] < 0]
@@ -390,12 +371,6 @@ if st.session_state.results is not None:
             mode="markers",
             name="Short Entries"
         ))
-
-        fig3.update_layout(
-            title="Preço + Entradas",
-            template="plotly_dark",
-            height=500
-        )
 
         st.plotly_chart(fig3, use_container_width=True)
 
