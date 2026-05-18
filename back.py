@@ -179,7 +179,10 @@ st.set_page_config(page_title="Backtest Engine", layout="wide")
 
 st.title("📊 Multi-Timeframe Backtest Engine")
 
-ticker = st.selectbox("Ativo", ["PETR4.SA","VALE3.SA","ITUB4.SA","BBAS3.SA","BOVA11.SA"])
+ticker = st.selectbox(
+    "Ativo",
+    ["PETR4.SA", "VALE3.SA", "ITUB4.SA", "BBAS3.SA", "BOVA11.SA"]
+)
 
 timeframes = st.multiselect(
     "Timeframes",
@@ -189,61 +192,107 @@ timeframes = st.multiselect(
 
 run = st.button("🚀 Rodar análise comparativa")
 
+
+# =====================================================
+# EXECUÇÃO
+# =====================================================
+
 if run:
 
-    with st.spinner("Rodando backtest..."):
+    results = []          # resumo comparativo
+    all_trades = {}       # trades por timeframe
+    equity_curves = {}    # equity por timeframe
 
-        df = get_data(ticker, interval)
+    with st.spinner("Rodando backtests em múltiplos timeframes..."):
 
-        bt = Backtest(
-            df,
-            MA_EntryEngine_V7,
-            cash=10000,
-            commission=0.0005,
-            trade_on_close=True,
-            exclusive_orders=True
-        )
+        for tf in timeframes:
 
-        stats = bt.run()
-        trades = stats._trades.copy()
+            # -------------------------------
+            # DATA
+            # -------------------------------
+            df = get_data(ticker, tf)
 
-    # =================================================
-    # MÉTRICAS
-    # =================================================
+            # importante para estratégia adaptativa (se você usar)
+            df.attrs["tf"] = tf
 
-    st.subheader("📈 Estatísticas")
+            # -------------------------------
+            # BACKTEST
+            # -------------------------------
+            bt = Backtest(
+                df,
+                MA_EntryEngine_V7,
+                cash=10000,
+                commission=0.0005,
+                trade_on_close=True,
+                exclusive_orders=True
+            )
 
-    col1, col2, col3 = st.columns(3)
+            stats = bt.run()
+            trades = stats._trades.copy()
 
-    col1.metric("Total Trades", len(trades))
-    col2.metric("Win Rate", f"{(trades[trades['PnL'] > 0].shape[0] / len(trades) * 100) if len(trades) > 0 else 0:.2f}%")
-    col3.metric("PnL Total", f"{trades['PnL'].sum():.2f}" if len(trades) > 0 else "0")
+            # -------------------------------
+            # MÉTRICAS
+            # -------------------------------
+            winrate = (
+                (trades["PnL"] > 0).sum() / len(trades) * 100
+                if len(trades) > 0 else 0
+            )
 
-    # =================================================
-    # DATAFRAME BONITO
-    # =================================================
+            pnl_total = trades["PnL"].sum() if len(trades) > 0 else 0
 
-    st.subheader("📋 Trades")
+            results.append({
+                "Timeframe": tf,
+                "Trades": len(trades),
+                "WinRate (%)": round(winrate, 2),
+                "PnL Total": round(pnl_total, 2)
+            })
+
+            all_trades[tf] = trades
+            equity_curves[tf] = stats._equity_curve["Equity"]
+
+
+    # =====================================================
+    # RESUMO COMPARATIVO
+    # =====================================================
+
+    st.subheader("📊 Comparação de Timeframes")
+
+    results_df = pd.DataFrame(results)
+    st.dataframe(results_df, use_container_width=True)
+
+
+    # =====================================================
+    # DETALHE DO MELHOR TIMEFRAME
+    # =====================================================
+
+    best_tf = results_df.sort_values("PnL Total", ascending=False).iloc[0]["Timeframe"]
+
+    st.success(f"🏆 Melhor timeframe: {best_tf}")
+
+
+    # =====================================================
+    # DETALHES POR TIMEFRAME
+    # =====================================================
+
+    st.subheader("📋 Trades por Timeframe")
+
+    selected_tf = st.selectbox(
+        "Ver trades do timeframe:",
+        timeframes
+    )
+
+    trades = all_trades[selected_tf]
 
     if len(trades) > 0:
 
         styled = trades.copy()
         styled["Side"] = np.where(styled["Size"] > 0, "LONG", "SHORT")
 
-        st.dataframe(
-            styled,
-            use_container_width=True
-        )
-
-        # =================================================
-        # EQUITY CURVE
-        # =================================================
+        st.dataframe(styled, use_container_width=True)
 
         st.subheader("📉 Equity Curve")
 
-        equity = stats._equity_curve
-
-        st.line_chart(equity["Equity"])
+        st.line_chart(equity_curves[selected_tf])
 
     else:
-        st.warning("Nenhum trade executado.")
+        st.warning(f"Nenhum trade executado no TF {selected_tf}")
