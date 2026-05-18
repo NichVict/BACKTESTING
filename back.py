@@ -16,7 +16,23 @@ import plotly.graph_objects as go
 def get_data(ticker, interval="1h", days=365):
 
     end = datetime.now()
-    start = end - timedelta(days=days)
+
+    # =====================================================
+    # LIMITES REAIS DO YAHOO FINANCE
+    # =====================================================
+
+    limits = {
+        "15m": 59,
+        "1h": 700,
+        "1d": 3650
+    }
+
+    max_days = limits.get(interval, 3650)
+
+    # garante que nunca pede mais do que o Yahoo permite
+    final_days = min(days, max_days)
+
+    start = end - timedelta(days=final_days)
 
     df = yf.download(
         ticker,
@@ -28,13 +44,12 @@ def get_data(ticker, interval="1h", days=365):
     )
 
     if df.empty:
-        raise ValueError("DataFrame vazio")
+        return pd.DataFrame()  # não quebra o app
 
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
     return df[["Open", "High", "Low", "Close", "Volume"]].dropna()
-
 
 # =====================================================
 # INDICADOR
@@ -240,6 +255,10 @@ if run:
         for tf in timeframes:
 
             df = get_data(ticker, tf, days=backtest_days)
+
+            if df.empty:
+                st.warning(f"Sem dados para {tf} no período selecionado")
+                continue
             df.tf = tf
 
             bt = Backtest(
