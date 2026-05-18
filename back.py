@@ -11,14 +11,18 @@ from backtesting import Backtest, Strategy
 # DATA
 # =====================================================
 
-def get_data(ticker, interval="1h"):
+def get_data(ticker, interval="1d"):
 
     end = datetime.now()
 
-    if interval == "1h":
+    if interval == "1d":
+        start = end - timedelta(days=3650)
+
+    elif interval == "1h":
         start = end - timedelta(days=700)
-    else:
-        start = datetime(2018, 1, 1)
+
+    elif interval == "15m":
+        start = end - timedelta(days=59)
 
     df = yf.download(
         ticker,
@@ -35,9 +39,7 @@ def get_data(ticker, interval="1h"):
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
-    df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
-
-    return df
+    return df[["Open", "High", "Low", "Close", "Volume"]].dropna()
 
 
 # =====================================================
