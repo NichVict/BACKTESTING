@@ -11,7 +11,7 @@ from backtesting import Backtest, Strategy
 # DATA
 # =====================================================
 
-def get_data(ticker, interval="1d"):
+def get_data(ticker, interval="1h"):
 
     end = datetime.now()
 
@@ -51,27 +51,27 @@ def SMA(values, period):
 
 
 # =====================================================
-# STRATEGY
+# STRATEGY ADAPTATIVA MULTI-TF
 # =====================================================
 
 class MA_EntryEngine_V7(Strategy):
 
     def init(self):
 
-        self.tf = self.data.df.attrs.get("tf", "1h")
+        self.tf = getattr(self.data, "tf", "1h")
 
-        # ajuste dinâmico de médias
+        # ----------------------------
+        # 15m (versão leve)
+        # ----------------------------
         if self.tf == "15m":
             self.ma20 = self.I(SMA, self.data.Close, 10)
             self.ma50 = self.I(SMA, self.data.Close, 30)
-            self.ma200 = None  # desliga
+            self.ma200 = None
 
-        elif self.tf == "1h":
-            self.ma20 = self.I(SMA, self.data.Close, 20)
-            self.ma50 = self.I(SMA, self.data.Close, 50)
-            self.ma200 = self.I(SMA, self.data.Close, 200)
-
-        else:  # 1d
+        # ----------------------------
+        # 1h / 1d (versão completa)
+        # ----------------------------
+        else:
             self.ma20 = self.I(SMA, self.data.Close, 20)
             self.ma50 = self.I(SMA, self.data.Close, 50)
             self.ma200 = self.I(SMA, self.data.Close, 200)
@@ -80,33 +80,53 @@ class MA_EntryEngine_V7(Strategy):
         self.stop = None
         self.partial_taken = False
 
+    # =================================================
+    # TREND UP
+    # =================================================
+
     def trend_up(self):
-    
+
         price = self.data.Close[-1]
-    
+
         if self.ma200 is None:
+
             return (
                 self.ma20[-1] > self.ma50[-1]
                 and self.ma20[-1] > self.ma20[-3]
                 and price > self.data.Close[-8]
             )
-    
+
         return (
             self.ma20[-1] > self.ma50[-1] > self.ma200[-1]
             and self.ma20[-1] > self.ma20[-5]
             and self.ma50[-1] > self.ma50[-5]
         )
 
+    # =================================================
+    # TREND DOWN
+    # =================================================
+
     def trend_down(self):
+
         price = self.data.Close[-1]
+
+        if self.ma200 is None:
+
+            return (
+                self.ma20[-1] < self.ma50[-1]
+                and self.ma20[-1] < self.ma20[-3]
+                and price < self.data.Close[-8]
+            )
 
         return (
             self.ma20[-1] < self.ma50[-1] < self.ma200[-1]
             and self.ma20[-1] < self.ma20[-5]
             and self.ma50[-1] < self.ma50[-5]
-            and (self.ma50[-1] - self.ma20[-1]) / price > 0.005
-            and price < self.data.Close[-10]
         )
+
+    # =================================================
+    # PULLBACK
+    # =================================================
 
     def pullback_long(self):
         return self.data.Low[-1] <= self.ma20[-1] <= self.data.High[-1]
@@ -114,32 +134,49 @@ class MA_EntryEngine_V7(Strategy):
     def pullback_short(self):
         return self.data.Low[-1] <= self.ma20[-1] <= self.data.High[-1]
 
+    # =================================================
+    # TRIGGERS
+    # =================================================
+
     def long_trigger(self):
         return self.data.Close[-1] > self.data.High[-2]
 
     def short_trigger(self):
         return self.data.Close[-1] < self.data.Low[-2]
 
+    # =================================================
+    # ENGINE
+    # =================================================
+
     def next(self):
 
         price = self.data.Close[-1]
 
+        # ----------------------------
+        # ENTRY
+        # ----------------------------
         if not self.position:
 
             if self.trend_up() and self.pullback_long() and self.long_trigger():
+
                 self.buy()
                 self.entry_price = price
                 self.stop = self.data.Low[-2]
                 self.partial_taken = False
 
             elif self.trend_down() and self.pullback_short() and self.short_trigger():
+
                 self.sell()
                 self.entry_price = price
                 self.stop = self.data.High[-2]
                 self.partial_taken = False
 
+        # ----------------------------
+        # MANAGEMENT
+        # ----------------------------
         else:
 
+            # LONG
             if self.position.is_long:
 
                 if price <= self.stop:
@@ -155,6 +192,7 @@ class MA_EntryEngine_V7(Strategy):
                 if price >= self.entry_price + 2 * risk:
                     self.position.close()
 
+            # SHORT
             else:
 
                 if price >= self.stop:
@@ -199,25 +237,17 @@ run = st.button("🚀 Rodar análise comparativa")
 
 if run:
 
-    results = []          # resumo comparativo
-    all_trades = {}       # trades por timeframe
-    equity_curves = {}    # equity por timeframe
+    results = []
+    all_trades = {}
+    equity_curves = {}
 
-    with st.spinner("Rodando backtests em múltiplos timeframes..."):
+    with st.spinner("Rodando backtests..."):
 
         for tf in timeframes:
 
-            # -------------------------------
-            # DATA
-            # -------------------------------
             df = get_data(ticker, tf)
+            df.tf = tf  # injeta metadata simples
 
-            # importante para estratégia adaptativa (se você usar)
-            df.attrs["tf"] = tf
-
-            # -------------------------------
-            # BACKTEST
-            # -------------------------------
             bt = Backtest(
                 df,
                 MA_EntryEngine_V7,
@@ -230,69 +260,54 @@ if run:
             stats = bt.run()
             trades = stats._trades.copy()
 
-            # -------------------------------
-            # MÉTRICAS
-            # -------------------------------
             winrate = (
                 (trades["PnL"] > 0).sum() / len(trades) * 100
                 if len(trades) > 0 else 0
             )
 
-            pnl_total = trades["PnL"].sum() if len(trades) > 0 else 0
+            pnl = trades["PnL"].sum() if len(trades) > 0 else 0
 
             results.append({
                 "Timeframe": tf,
                 "Trades": len(trades),
                 "WinRate (%)": round(winrate, 2),
-                "PnL Total": round(pnl_total, 2)
+                "PnL": round(pnl, 2)
             })
 
             all_trades[tf] = trades
             equity_curves[tf] = stats._equity_curve["Equity"]
 
-
-    # =====================================================
-    # RESUMO COMPARATIVO
-    # =====================================================
+    # =================================================
+    # RESULTADO COMPARATIVO
+    # =================================================
 
     st.subheader("📊 Comparação de Timeframes")
 
-    results_df = pd.DataFrame(results)
-    st.dataframe(results_df, use_container_width=True)
+    df_results = pd.DataFrame(results)
+    st.dataframe(df_results, use_container_width=True)
 
+    best = df_results.sort_values("PnL", ascending=False).iloc[0]["Timeframe"]
 
-    # =====================================================
-    # DETALHE DO MELHOR TIMEFRAME
-    # =====================================================
+    st.success(f"🏆 Melhor timeframe: {best}")
 
-    best_tf = results_df.sort_values("PnL Total", ascending=False).iloc[0]["Timeframe"]
+    # =================================================
+    # DETALHES
+    # =================================================
 
-    st.success(f"🏆 Melhor timeframe: {best_tf}")
+    selected = st.selectbox("Ver detalhes do TF", timeframes)
 
-
-    # =====================================================
-    # DETALHES POR TIMEFRAME
-    # =====================================================
-
-    st.subheader("📋 Trades por Timeframe")
-
-    selected_tf = st.selectbox(
-        "Ver trades do timeframe:",
-        timeframes
-    )
-
-    trades = all_trades[selected_tf]
+    trades = all_trades[selected]
 
     if len(trades) > 0:
 
         styled = trades.copy()
         styled["Side"] = np.where(styled["Size"] > 0, "LONG", "SHORT")
 
+        st.subheader("📋 Trades")
         st.dataframe(styled, use_container_width=True)
 
         st.subheader("📉 Equity Curve")
-
-        st.line_chart(equity_curves[selected_tf])
+        st.line_chart(equity_curves[selected])
 
     else:
-        st.warning(f"Nenhum trade executado no TF {selected_tf}")
+        st.warning("Nenhum trade nesse timeframe.")
