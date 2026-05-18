@@ -57,23 +57,44 @@ def SMA(values, period):
 class MA_EntryEngine_V7(Strategy):
 
     def init(self):
-        self.ma20 = self.I(SMA, self.data.Close, 20)
-        self.ma50 = self.I(SMA, self.data.Close, 50)
-        self.ma200 = self.I(SMA, self.data.Close, 200)
+
+        self.tf = self.data.df.attrs.get("tf", "1h")
+
+        # ajuste dinâmico de médias
+        if self.tf == "15m":
+            self.ma20 = self.I(SMA, self.data.Close, 10)
+            self.ma50 = self.I(SMA, self.data.Close, 30)
+            self.ma200 = None  # desliga
+
+        elif self.tf == "1h":
+            self.ma20 = self.I(SMA, self.data.Close, 20)
+            self.ma50 = self.I(SMA, self.data.Close, 50)
+            self.ma200 = self.I(SMA, self.data.Close, 200)
+
+        else:  # 1d
+            self.ma20 = self.I(SMA, self.data.Close, 20)
+            self.ma50 = self.I(SMA, self.data.Close, 50)
+            self.ma200 = self.I(SMA, self.data.Close, 200)
 
         self.entry_price = None
         self.stop = None
         self.partial_taken = False
 
     def trend_up(self):
+    
         price = self.data.Close[-1]
-
+    
+        if self.ma200 is None:
+            return (
+                self.ma20[-1] > self.ma50[-1]
+                and self.ma20[-1] > self.ma20[-3]
+                and price > self.data.Close[-8]
+            )
+    
         return (
             self.ma20[-1] > self.ma50[-1] > self.ma200[-1]
             and self.ma20[-1] > self.ma20[-5]
             and self.ma50[-1] > self.ma50[-5]
-            and (self.ma20[-1] - self.ma50[-1]) / price > 0.005
-            and price > self.data.Close[-10]
         )
 
     def trend_down(self):
@@ -156,14 +177,17 @@ class MA_EntryEngine_V7(Strategy):
 
 st.set_page_config(page_title="Backtest Engine", layout="wide")
 
-st.title("📊 Backtest MA Engine V7")
+st.title("📊 Multi-Timeframe Backtest Engine")
 
-tickers = ["PETR4.SA", "VALE3.SA", "ITUB4.SA", "BBAS3.SA", "BOVA11.SA"]
+ticker = st.selectbox("Ativo", ["PETR4.SA","VALE3.SA","ITUB4.SA","BBAS3.SA","BOVA11.SA"])
 
-ticker = st.selectbox("Escolha o ativo", tickers)
-interval = st.selectbox("Timeframe", ["1h", "15m"])
+timeframes = st.multiselect(
+    "Timeframes",
+    ["15m", "1h", "1d"],
+    default=["1h", "1d"]
+)
 
-run = st.button("🚀 Rodar Backtest")
+run = st.button("🚀 Rodar análise comparativa")
 
 if run:
 
