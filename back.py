@@ -17,10 +17,8 @@ def get_data(ticker, interval="1h"):
 
     if interval == "1d":
         start = end - timedelta(days=3650)
-
     elif interval == "1h":
         start = end - timedelta(days=700)
-
     elif interval == "15m":
         start = end - timedelta(days=59)
 
@@ -51,7 +49,7 @@ def SMA(values, period):
 
 
 # =====================================================
-# STRATEGY ADAPTATIVA MULTI-TF
+# STRATEGY ADAPTATIVA
 # =====================================================
 
 class MA_EntryEngine_V7(Strategy):
@@ -60,17 +58,10 @@ class MA_EntryEngine_V7(Strategy):
 
         self.tf = getattr(self.data, "tf", "1h")
 
-        # ----------------------------
-        # 15m (versão leve)
-        # ----------------------------
         if self.tf == "15m":
             self.ma20 = self.I(SMA, self.data.Close, 10)
             self.ma50 = self.I(SMA, self.data.Close, 30)
             self.ma200 = None
-
-        # ----------------------------
-        # 1h / 1d (versão completa)
-        # ----------------------------
         else:
             self.ma20 = self.I(SMA, self.data.Close, 20)
             self.ma50 = self.I(SMA, self.data.Close, 50)
@@ -125,7 +116,7 @@ class MA_EntryEngine_V7(Strategy):
         )
 
     # =================================================
-    # PULLBACK
+    # ENTRY LOGIC
     # =================================================
 
     def pullback_long(self):
@@ -134,10 +125,6 @@ class MA_EntryEngine_V7(Strategy):
     def pullback_short(self):
         return self.data.Low[-1] <= self.ma20[-1] <= self.data.High[-1]
 
-    # =================================================
-    # TRIGGERS
-    # =================================================
-
     def long_trigger(self):
         return self.data.Close[-1] > self.data.High[-2]
 
@@ -145,38 +132,38 @@ class MA_EntryEngine_V7(Strategy):
         return self.data.Close[-1] < self.data.Low[-2]
 
     # =================================================
-    # ENGINE
+    # EXECUTION
     # =================================================
 
     def next(self):
 
         price = self.data.Close[-1]
 
-        # ----------------------------
-        # ENTRY
-        # ----------------------------
         if not self.position:
 
+            # LONG
             if self.trend_up() and self.pullback_long() and self.long_trigger():
 
-                self.buy()
-                self.entry_price = price
                 self.stop = self.data.Low[-2]
+
+                self.buy(sl=self.stop)   # ✔ FIX SL
+
+                self.entry_price = price
                 self.partial_taken = False
 
+            # SHORT
             elif self.trend_down() and self.pullback_short() and self.short_trigger():
 
-                self.sell()
-                self.entry_price = price
                 self.stop = self.data.High[-2]
+
+                self.sell(sl=self.stop)  # ✔ FIX SL
+
+                self.entry_price = price
                 self.partial_taken = False
 
-        # ----------------------------
-        # MANAGEMENT
-        # ----------------------------
         else:
 
-            # LONG
+            # LONG MANAGEMENT
             if self.position.is_long:
 
                 if price <= self.stop:
@@ -192,7 +179,7 @@ class MA_EntryEngine_V7(Strategy):
                 if price >= self.entry_price + 2 * risk:
                     self.position.close()
 
-            # SHORT
+            # SHORT MANAGEMENT
             else:
 
                 if price >= self.stop:
@@ -210,7 +197,21 @@ class MA_EntryEngine_V7(Strategy):
 
 
 # =====================================================
-# STREAMLIT UI
+# STREAMLIT STATE
+# =====================================================
+
+if "results" not in st.session_state:
+    st.session_state.results = None
+
+if "all_trades" not in st.session_state:
+    st.session_state.all_trades = None
+
+if "equity_curves" not in st.session_state:
+    st.session_state.equity_curves = None
+
+
+# =====================================================
+# UI
 # =====================================================
 
 st.set_page_config(page_title="Backtest Engine", layout="wide")
@@ -228,11 +229,11 @@ timeframes = st.multiselect(
     default=["1h", "1d"]
 )
 
-run = st.button("🚀 Rodar análise comparativa")
+run = st.button("🚀 Rodar análise")
 
 
 # =====================================================
-# EXECUÇÃO
+# RUN BACKTESTS
 # =====================================================
 
 if run:
@@ -246,7 +247,7 @@ if run:
         for tf in timeframes:
 
             df = get_data(ticker, tf)
-            df.tf = tf  # injeta metadata simples
+            df.tf = tf
 
             bt = Backtest(
                 df,
@@ -277,26 +278,31 @@ if run:
             all_trades[tf] = trades
             equity_curves[tf] = stats._equity_curve["Equity"]
 
-    # =================================================
-    # RESULTADO COMPARATIVO
-    # =================================================
+    st.session_state.results = results
+    st.session_state.all_trades = all_trades
+    st.session_state.equity_curves = equity_curves
+
+
+# =====================================================
+# RESULTS VIEW
+# =====================================================
+
+if st.session_state.results is not None:
+
+    df_results = pd.DataFrame(st.session_state.results)
 
     st.subheader("📊 Comparação de Timeframes")
-
-    df_results = pd.DataFrame(results)
     st.dataframe(df_results, use_container_width=True)
 
     best = df_results.sort_values("PnL", ascending=False).iloc[0]["Timeframe"]
-
     st.success(f"🏆 Melhor timeframe: {best}")
 
-    # =================================================
-    # DETALHES
-    # =================================================
+    selected = st.selectbox(
+        "Ver detalhes do TF",
+        df_results["Timeframe"].tolist()
+    )
 
-    selected = st.selectbox("Ver detalhes do TF", timeframes)
-
-    trades = all_trades[selected]
+    trades = st.session_state.all_trades[selected]
 
     if len(trades) > 0:
 
@@ -307,7 +313,7 @@ if run:
         st.dataframe(styled, use_container_width=True)
 
         st.subheader("📉 Equity Curve")
-        st.line_chart(equity_curves[selected])
+        st.line_chart(st.session_state.equity_curves[selected])
 
     else:
         st.warning("Nenhum trade nesse timeframe.")
