@@ -70,19 +70,22 @@ def SMA(values, period):
 
 class Long_MM20_Breakout(Strategy):
 
-    target_r = 2.0      # alvo = 2x o risco
-    ma20_lookback = 3   # candles atrás p/ checar MM20 ascendente
+    target_r = 2.0  # alvo = 2x o risco
 
     def init(self):
         self.ma20 = self.I(SMA, self.data.Close, 20)
+        self.ma50 = self.I(SMA, self.data.Close, 50)
 
-    # ---------------- CONDIÇÕES DA MÉDIA ---------------- #
+    # ---------------- CONDIÇÃO DE TENDÊNCIA ---------------- #
+    # Automática e sem parâmetro de candles: MM20 acima da MM50 só
+    # acontece quando o preço vem subindo de forma consistente. Não
+    # depende de comparar a própria média com um ponto arbitrário do
+    # passado (o que é sensível a ruído).
 
     def ma20_up(self):
-        lb = self.ma20_lookback
-        if len(self.ma20) <= lb or np.isnan(self.ma20[-lb]):
+        if np.isnan(self.ma20[-1]) or np.isnan(self.ma50[-1]):
             return False
-        return self.ma20[-1] > self.ma20[-lb]
+        return self.ma20[-1] > self.ma50[-1]
 
     def touched_ma20(self):
         return self.data.Low[-1] <= self.ma20[-1] <= self.data.High[-1]
@@ -91,7 +94,7 @@ class Long_MM20_Breakout(Strategy):
 
     def next(self):
 
-        # Se a MM20 deixou de estar ascendente, cancela qualquer ordem
+        # Se a MM20 deixou de estar acima da MM50, cancela qualquer ordem
         # de rompimento ainda pendente
         if self.orders and not self.ma20_up():
             for order in list(self.orders):
@@ -101,7 +104,7 @@ class Long_MM20_Breakout(Strategy):
         if self.position or self.orders:
             return
 
-        # Procura novo candle que tocou a MM20 com a MM20 ascendente
+        # Procura novo candle que tocou a MM20 com a MM20 acima da MM50
         if self.ma20_up() and self.touched_ma20():
 
             high = self.data.High[-1]
