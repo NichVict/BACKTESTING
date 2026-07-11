@@ -225,9 +225,10 @@ class MA_Alignment_Setup(Strategy):
 
     atr_period = 14
     atr_mult = 3.0
-    ma_lookback = 5              # candles atrás p/ checar inclinação da MA20
-    use_structure_filter = False # filtro extra de topos/fundos (aproximado)
-    structure_window = 10        # tamanho da janela p/ comparar topos/fundos
+    ma_lookback = 20              # tamanho da janela p/ regressão da inclinação da MA20
+    min_slope_pct = 0.02          # inclinação mínima (% por candle) p/ considerar tendência clara
+    use_structure_filter = False  # filtro extra de topos/fundos (aproximado)
+    structure_window = 10         # tamanho da janela p/ comparar topos/fundos
 
     def init(self):
 
@@ -258,19 +259,41 @@ class MA_Alignment_Setup(Strategy):
     def aligned_down(self):
         return self.ma200[-1] > self.ma50[-1] > self.ma20[-1] > self.ma8[-1]
 
-    # ---------------- INCLINAÇÃO ---------------- #
+    # ---------------- INCLINAÇÃO (regressão linear sobre a janela) ---------------- #
+
+    def ma20_slope_pct(self):
+        """Inclinação da MA20 em % por candle, via regressão linear sobre
+        a janela `ma_lookback`. Normalizada pelo preço médio da janela para
+        ser comparável entre ativos/timeframes diferentes."""
+
+        w = self.ma_lookback
+        if len(self.ma20) < w:
+            return None
+
+        y = np.asarray(self.ma20[-w:], dtype=float)
+        if np.isnan(y).any():
+            return None
+
+        x = np.arange(w)
+        slope = np.polyfit(x, y, 1)[0]
+        mean_price = y.mean()
+
+        if mean_price == 0:
+            return None
+
+        return (slope / mean_price) * 100
 
     def ma20_up(self):
-        lb = self.ma_lookback
-        if len(self.ma20) <= lb or np.isnan(self.ma20[-lb]):
+        slope = self.ma20_slope_pct()
+        if slope is None:
             return False
-        return self.ma20[-1] > self.ma20[-lb]
+        return slope > self.min_slope_pct
 
     def ma20_down(self):
-        lb = self.ma_lookback
-        if len(self.ma20) <= lb or np.isnan(self.ma20[-lb]):
+        slope = self.ma20_slope_pct()
+        if slope is None:
             return False
-        return self.ma20[-1] < self.ma20[-lb]
+        return slope < -self.min_slope_pct
 
     # ---------------- ESTRUTURA DE TOPOS/FUNDOS (aproximada) ---------------- #
 
@@ -467,12 +490,15 @@ if setup_name.startswith("Alinhamento"):
     with col1:
         atr_mult = st.slider("Multiplicador ATR (trailing stop)", 1.0, 5.0, 3.0, 0.5)
     with col2:
-        ma_lookback = st.selectbox("Candles p/ checar inclinação da MM20", [3, 5, 8, 10], index=1)
+        ma_lookback = st.slider("Janela p/ regressão da inclinação (candles)", 10, 100, 20, 5)
     with col3:
-        use_structure_filter = st.checkbox("Exigir topos/fundos ascendentes/descendentes", value=False)
+        min_slope_pct = st.slider("Inclinação mínima da MM20 (% por candle)", 0.0, 0.2, 0.02, 0.01)
+
+    use_structure_filter = st.checkbox("Exigir topos/fundos ascendentes/descendentes", value=False)
 
     strategy_kwargs["atr_mult"] = atr_mult
     strategy_kwargs["ma_lookback"] = ma_lookback
+    strategy_kwargs["min_slope_pct"] = min_slope_pct
     strategy_kwargs["use_structure_filter"] = use_structure_filter
 
 run = st.button("🚀 Rodar análise")
