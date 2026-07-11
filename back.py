@@ -23,6 +23,8 @@ def get_data(ticker, interval="1h"):
         start = end - timedelta(days=700)
     elif interval == "15m":
         start = end - timedelta(days=59)
+    elif interval == "5m":
+        start = end - timedelta(days=59)
 
     df = yf.download(
         ticker,
@@ -48,6 +50,21 @@ def get_data(ticker, interval="1h"):
 
 def SMA(values, period):
     return pd.Series(values).rolling(period).mean().values
+
+
+def ATR(high, low, close, period):
+    high = pd.Series(high)
+    low = pd.Series(low)
+    close = pd.Series(close)
+    prev_close = close.shift(1)
+
+    tr = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low - prev_close).abs()
+    ], axis=1).max(axis=1)
+
+    return tr.rolling(period).mean().values
 
 
 # =====================================================
@@ -183,45 +200,45 @@ class MA_EntryEngine_V7(Strategy):
 
 
 # =====================================================
-# STRATEGY 2 - PC (PONTO CONTÍNUO) - Stormer / Palex
+# STRATEGY 2 - SETUP PRÓPRIO (alinhamento MM8/20/50/200 + MM20)
 # =====================================================
 #
-# Regras:
-# 1) Tendência definida pela inclinação da MA (default 21 periodos)
-# 2) Aguarda o candle "tocar" a MA (min <= MA <= max) sem a MA mudar de direção
-# 3) Marca a máxima/mínima do candle que tocou
-# 4) Fica "armado" enquanto a MA não reverter, aguardando rompimento
-# 5) Entrada no rompimento da máxima (compra) ou mínima (venda) do candle marcado
-# 6) Stop na mínima/máxima do próprio candle marcado
-# 7) Gestão: parcial em 1R + stop total em 2R (mesmo padrão do V7, pode trocar
-#    por "alvo = amplitude do candle projetada" se preferir o critério original
-#    do Stormer)
+# Regras (conforme definido pelo usuário):
+# 1) Alinhamento das médias:
+#      Alta:  MA200 < MA50 < MA20 < MA8
+#      Baixa: MA200 > MA50 > MA20 > MA8
+# 2) Tendência clara: inclinação das médias (MA20 subindo/descendo) e/ou
+#    estrutura de topos e fundos do preço (higher-highs/higher-lows para
+#    alta, lower-highs/lower-lows para baixa) — filtro de estrutura é
+#    opcional/aproximado, ligado via checkbox na UI.
+# 3) Entrada: rompimento da máxima (compra) ou mínima (venda) do candle que
+#    tocou a MA20, respeitando o alinhamento.
+# 4) Stop: mínima (compra) ou máxima (venda) do candle que tocou a MA20.
+# 5) Alvo: 2R e 3R (R = distância entre a mínima do candle de toque e o
+#    preço de entrada) — parcial em 2R, restante corre até 3R OU até romper
+#    um stop móvel baseado em ATR (chandelier exit), o que vier primeiro.
 #
-# Parâmetros expostos como atributos de classe (podem ser sobrescritos via
-# bt.run(ma_period=..., use_volume_filter=...) na Streamlit UI)
+# Parâmetros expostos como atributos de classe (sobrescrevíveis via
+# bt.run(**kwargs) na UI)
 
-class PC_Setup(Strategy):
+class MA_Alignment_Setup(Strategy):
 
-    ma_period = 21
-    ma_lookback = 5          # candles atrás p/ checar inclinação da MA
-    use_volume_filter = False
-    volume_ma_period = 20
+    atr_period = 14
+    atr_mult = 3.0
+    ma_lookback = 5              # candles atrás p/ checar inclinação da MA20
+    use_structure_filter = False # filtro extra de topos/fundos (aproximado)
+    structure_window = 10        # tamanho da janela p/ comparar topos/fundos
 
     def init(self):
 
         self.tf = getattr(self.data, "tf", "1h")
 
-        period = self.ma_period
-        if self.tf == "15m" and self.ma_period == 21:
-            # em TF menor, reduz um pouco o período p/ não ficar "lento" demais
-            period = 14
+        self.ma8 = self.I(SMA, self.data.Close, 8)
+        self.ma20 = self.I(SMA, self.data.Close, 20)
+        self.ma50 = self.I(SMA, self.data.Close, 50)
+        self.ma200 = self.I(SMA, self.data.Close, 200)
 
-        self.ma = self.I(SMA, self.data.Close, period)
-
-        if self.use_volume_filter:
-            self.vol_ma = self.I(SMA, self.data.Volume, self.volume_ma_period)
-        else:
-            self.vol_ma = None
+        self.atr = self.I(ATR, self.data.High, self.data.Low, self.data.Close, self.atr_period)
 
         # estado do sinal armado (aguardando rompimento)
         self.pending_dir = None      # 'long' ou 'short'
@@ -229,36 +246,68 @@ class PC_Setup(Strategy):
         self.pending_low = None
 
         self.entry_price = None
-        self.stop = None
+        self.stop = None            # stop fixo inicial (mínima/máxima do candle de toque)
+        self.trail_extreme = None   # maior alta (long) / menor baixa (short) desde a entrada
         self.partial_taken = False
 
-    # ---------------- TREND ---------------- #
+    # ---------------- ALINHAMENTO DAS MÉDIAS ---------------- #
 
-    def ma_up(self):
+    def aligned_up(self):
+        return self.ma200[-1] < self.ma50[-1] < self.ma20[-1] < self.ma8[-1]
+
+    def aligned_down(self):
+        return self.ma200[-1] > self.ma50[-1] > self.ma20[-1] > self.ma8[-1]
+
+    # ---------------- INCLINAÇÃO ---------------- #
+
+    def ma20_up(self):
         lb = self.ma_lookback
-        if len(self.ma) <= lb or np.isnan(self.ma[-lb]):
+        if len(self.ma20) <= lb or np.isnan(self.ma20[-lb]):
             return False
-        return self.ma[-1] > self.ma[-lb]
+        return self.ma20[-1] > self.ma20[-lb]
 
-    def ma_down(self):
+    def ma20_down(self):
         lb = self.ma_lookback
-        if len(self.ma) <= lb or np.isnan(self.ma[-lb]):
+        if len(self.ma20) <= lb or np.isnan(self.ma20[-lb]):
             return False
-        return self.ma[-1] < self.ma[-lb]
+        return self.ma20[-1] < self.ma20[-lb]
 
-    # ---------------- TOUCH ---------------- #
+    # ---------------- ESTRUTURA DE TOPOS/FUNDOS (aproximada) ---------------- #
 
-    def touched_ma(self):
-        return self.data.Low[-1] <= self.ma[-1] <= self.data.High[-1]
-
-    # ---------------- VOLUME FILTER ---------------- #
-
-    def volume_ok(self):
-        if not self.use_volume_filter or self.vol_ma is None:
+    def structure_up(self):
+        if not self.use_structure_filter:
             return True
-        if np.isnan(self.vol_ma[-1]):
+
+        w = self.structure_window
+        if len(self.data.Close) < 2 * w:
+            return False
+
+        low_recent = min(self.data.Low[-w:])
+        low_prior = min(self.data.Low[-2 * w:-w])
+        return low_recent > low_prior  # fundo mais alto
+
+    def structure_down(self):
+        if not self.use_structure_filter:
             return True
-        return self.data.Volume[-1] > self.vol_ma[-1]
+
+        w = self.structure_window
+        if len(self.data.Close) < 2 * w:
+            return False
+
+        high_recent = max(self.data.High[-w:])
+        high_prior = max(self.data.High[-2 * w:-w])
+        return high_recent < high_prior  # topo mais baixo
+
+    def trend_up(self):
+        return self.aligned_up() and self.ma20_up() and self.structure_up()
+
+    def trend_down(self):
+        return self.aligned_down() and self.ma20_down() and self.structure_down()
+
+    # ---------------- TOQUE NA MM20 ---------------- #
+
+    def touched_ma20(self):
+        return self.data.Low[-1] <= self.ma20[-1] <= self.data.High[-1]
 
     # ---------------- EXECUTION ---------------- #
 
@@ -268,86 +317,105 @@ class PC_Setup(Strategy):
 
         if not self.position:
 
-            # ---- Já existe sinal armado: checa cancelamento / rompimento ---- #
+            # ---- Sinal já armado: checa cancelamento / rompimento ---- #
             if self.pending_dir == "long":
 
-                if not self.ma_up():
-                    self.pending_dir = None  # MA reverteu, cancela
+                if not self.trend_up():
+                    self.pending_dir = None  # perdeu alinhamento/tendência, cancela
 
-                elif self.data.Close[-1] > self.pending_high and self.volume_ok():
+                elif self.data.Close[-1] > self.pending_high:
                     self.stop = self.pending_low
                     self.buy(sl=self.stop)
                     self.entry_price = price
+                    self.trail_extreme = price
                     self.partial_taken = False
                     self.pending_dir = None
 
             elif self.pending_dir == "short":
 
-                if not self.ma_down():
+                if not self.trend_down():
                     self.pending_dir = None
 
-                elif self.data.Close[-1] < self.pending_low and self.volume_ok():
+                elif self.data.Close[-1] < self.pending_low:
                     self.stop = self.pending_high
                     self.sell(sl=self.stop)
                     self.entry_price = price
+                    self.trail_extreme = price
                     self.partial_taken = False
                     self.pending_dir = None
 
-            # ---- Nenhum sinal armado: procura novo toque na MA ---- #
+            # ---- Nenhum sinal armado: procura novo toque na MM20 ---- #
             else:
 
-                if self.ma_up() and self.touched_ma():
+                if self.trend_up() and self.touched_ma20():
                     self.pending_dir = "long"
                     self.pending_high = self.data.High[-1]
                     self.pending_low = self.data.Low[-1]
 
-                elif self.ma_down() and self.touched_ma():
+                elif self.trend_down() and self.touched_ma20():
                     self.pending_dir = "short"
                     self.pending_high = self.data.High[-1]
                     self.pending_low = self.data.Low[-1]
 
         else:
 
-            # ---- Gestão da posição aberta (parcial 1R + full 2R) ---- #
+            # ---- Gestão da posição aberta ---- #
+            atr_val = self.atr[-1]
+            has_atr = not np.isnan(atr_val)
 
             if self.position.is_long:
 
-                if price <= self.stop:
-                    self.position.close()
-                    return
+                self.trail_extreme = max(self.trail_extreme, self.data.High[-1])
 
                 risk = self.entry_price - self.stop
                 if risk <= 0:
                     return
 
-                if not self.partial_taken and price >= self.entry_price + risk:
+                # stop móvel (chandelier exit) - só sobe, nunca desce
+                effective_stop = self.stop
+                if has_atr:
+                    atr_stop = self.trail_extreme - self.atr_mult * atr_val
+                    effective_stop = max(effective_stop, atr_stop)
+
+                if price <= effective_stop:
+                    self.position.close()
+                    return
+
+                if not self.partial_taken and price >= self.entry_price + 2 * risk:
                     self.position.close(0.5)
                     self.partial_taken = True
 
-                if price >= self.entry_price + 2 * risk:
+                if price >= self.entry_price + 3 * risk:
                     self.position.close()
 
             else:
 
-                if price >= self.stop:
-                    self.position.close()
-                    return
+                self.trail_extreme = min(self.trail_extreme, self.data.Low[-1])
 
                 risk = self.stop - self.entry_price
                 if risk <= 0:
                     return
 
-                if not self.partial_taken and price <= self.entry_price - risk:
+                effective_stop = self.stop
+                if has_atr:
+                    atr_stop = self.trail_extreme + self.atr_mult * atr_val
+                    effective_stop = min(effective_stop, atr_stop)
+
+                if price >= effective_stop:
+                    self.position.close()
+                    return
+
+                if not self.partial_taken and price <= self.entry_price - 2 * risk:
                     self.position.close(0.5)
                     self.partial_taken = True
 
-                if price <= self.entry_price - 2 * risk:
+                if price <= self.entry_price - 3 * risk:
                     self.position.close()
 
 
 STRATEGIES = {
     "Pullback Multi-MA (V7)": MA_EntryEngine_V7,
-    "PC - Ponto Contínuo (Stormer/Palex)": PC_Setup,
+    "Alinhamento MM8/20/50/200 + toque MM20": MA_Alignment_Setup,
 }
 
 
@@ -383,8 +451,8 @@ ticker = st.selectbox(
 
 timeframes = st.multiselect(
     "Timeframes",
-    ["15m", "1h", "1d"],
-    default=["1h", "1d"]
+    ["5m", "15m", "1h", "1d"],
+    default=["5m"]
 )
 
 setup_name = st.selectbox(
@@ -394,15 +462,18 @@ setup_name = st.selectbox(
 
 strategy_kwargs = {}
 
-if setup_name.startswith("PC"):
-    col1, col2 = st.columns(2)
+if setup_name.startswith("Alinhamento"):
+    col1, col2, col3 = st.columns(3)
     with col1:
-        ma_period = st.selectbox("Período da MA (PC)", [9, 20, 21], index=2)
+        atr_mult = st.slider("Multiplicador ATR (trailing stop)", 1.0, 5.0, 3.0, 0.5)
     with col2:
-        use_volume_filter = st.checkbox("Filtrar por volume no rompimento", value=False)
+        ma_lookback = st.selectbox("Candles p/ checar inclinação da MM20", [3, 5, 8, 10], index=1)
+    with col3:
+        use_structure_filter = st.checkbox("Exigir topos/fundos ascendentes/descendentes", value=False)
 
-    strategy_kwargs["ma_period"] = ma_period
-    strategy_kwargs["use_volume_filter"] = use_volume_filter
+    strategy_kwargs["atr_mult"] = atr_mult
+    strategy_kwargs["ma_lookback"] = ma_lookback
+    strategy_kwargs["use_structure_filter"] = use_structure_filter
 
 run = st.button("🚀 Rodar análise")
 
