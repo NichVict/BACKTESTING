@@ -70,23 +70,19 @@ def SMA(values, period):
 
 class Long_MM20_Breakout(Strategy):
 
-    target_r = 2.0  # alvo = 2x o risco
+    target_r = 2.0      # alvo = 2x o risco
+    ma20_lookback = 3   # candles atrás p/ checar MM20 ascendente
 
     def init(self):
-        self.ma8 = self.I(SMA, self.data.Close, 8)
         self.ma20 = self.I(SMA, self.data.Close, 20)
 
-    # ---------------- CONDIÇÕES DAS MÉDIAS ---------------- #
-
-    def ma8_not_down(self):
-        if len(self.ma8) < 2 or np.isnan(self.ma8[-2]):
-            return False
-        return self.ma8[-1] >= self.ma8[-2]
+    # ---------------- CONDIÇÕES DA MÉDIA ---------------- #
 
     def ma20_up(self):
-        if len(self.ma20) < 2 or np.isnan(self.ma20[-2]):
+        lb = self.ma20_lookback
+        if len(self.ma20) <= lb or np.isnan(self.ma20[-lb]):
             return False
-        return self.ma20[-1] > self.ma20[-2]
+        return self.ma20[-1] > self.ma20[-lb]
 
     def touched_ma20(self):
         return self.data.Low[-1] <= self.ma20[-1] <= self.data.High[-1]
@@ -95,9 +91,9 @@ class Long_MM20_Breakout(Strategy):
 
     def next(self):
 
-        # Se as condições de tendência deixaram de valer, cancela qualquer
-        # ordem de rompimento ainda pendente
-        if self.orders and not (self.ma8_not_down() and self.ma20_up()):
+        # Se a MM20 deixou de estar ascendente, cancela qualquer ordem
+        # de rompimento ainda pendente
+        if self.orders and not self.ma20_up():
             for order in list(self.orders):
                 order.cancel()
 
@@ -105,8 +101,8 @@ class Long_MM20_Breakout(Strategy):
         if self.position or self.orders:
             return
 
-        # Procura novo candle que tocou a MM20 dentro das condições de tendência
-        if self.ma8_not_down() and self.ma20_up() and self.touched_ma20():
+        # Procura novo candle que tocou a MM20 com a MM20 ascendente
+        if self.ma20_up() and self.touched_ma20():
 
             high = self.data.High[-1]
             low = self.data.Low[-1]
@@ -147,6 +143,12 @@ timeframes = st.multiselect(
     default=["5m"]
 )
 
+col1, col2 = st.columns(2)
+with col1:
+    ma20_lookback = st.slider("Candles p/ checar MM20 ascendente", 1, 10, 3)
+with col2:
+    st.empty()
+
 run = st.button("🚀 Rodar análise")
 
 
@@ -163,6 +165,7 @@ if run:
         for tf in timeframes:
 
             df = get_data(ticker, tf)
+            n_candles = len(df)
 
             bt = Backtest(
                 df,
@@ -172,7 +175,7 @@ if run:
                 exclusive_orders=True
             )
 
-            stats = bt.run()
+            stats = bt.run(ma20_lookback=ma20_lookback)
             trades = stats._trades
 
             n_trades = len(trades)
@@ -182,6 +185,7 @@ if run:
 
             results.append({
                 "Timeframe": tf,
+                "Candles": n_candles,
                 "Trades": n_trades,
                 "Acertos": wins,
                 "Erros": losses,
